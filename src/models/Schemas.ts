@@ -2,7 +2,8 @@ import { Collection } from 'fireorm';
 
 export enum RequestStatus {
   RASCUNHO = 'Rascunho',
-  PENDENTE = 'Pendente',
+  PENDENTE_DIRETOR = 'Aguardando Diretor',
+  PENDENTE_FINANCEIRO = 'Aguardando Financeiro',
   APROVADO = 'Aprovado',
   REJEITADO = 'Rejeitado',
   DEVOLVIDO = 'Devolvido',
@@ -12,11 +13,9 @@ export enum RequestStatus {
 export class Request {
   id!: string;
   userId!: string;
+  user!: string;
   title!: string;
-  type!: string;
-  project!: string;
   paymentMethod!: string;
-  location!: string;
   date!: Date;
   status!: RequestStatus;
   totalValue!: number;
@@ -29,6 +28,7 @@ export class Request {
   chargeClass?: string;
   competence?: string;
   nfNumber?: string;
+  approverId?: string;
 }
 
 @Collection('receipts')
@@ -51,4 +51,45 @@ export class History {
   date!: Date;
   userName!: string;
   note?: string;
+}
+
+// --- Tabelas Mestras (Master Data) ---
+
+@Collection('subsidiaries')
+export class Subsidiary {
+  id!: string;
+  name!: string;
+  active: boolean = true;
+}
+
+@Collection('departments')
+export class Department {
+  id!: string;
+  name!: string;
+  active: boolean = true;
+}
+
+@Collection('chargeClasses')
+export class ChargeClass {
+  id!: string;
+  name!: string;
+  active: boolean = true;
+  subsidiaryId?: string;
+}
+
+export enum UserLevel {
+  COLABORADOR = 'Colaborador',
+  DIRETOR = 'Diretor',
+}
+
+@Collection('users')
+export class User {
+  id!: string;
+  name!: string;
+  email?: string;
+  level!: UserLevel;
+  approverId?: string;
+  approverName?: string;
+  loginId!: string;
+  active: boolean = true;
 }

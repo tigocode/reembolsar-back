@@ -3,46 +3,86 @@ import { getRepository } from 'fireorm';
 import { Request, RequestStatus, Receipt, History } from '../models/Schemas.js';
 
 export class RequestController {
+  private static toJSDate(d: any): Date | undefined {
+    if (!d) return undefined;
+    if (d instanceof Date) return d;
+    if (typeof d.toDate === 'function') return d.toDate();
+    if (d._seconds && d._nanoseconds) return new Date(d._seconds * 1000);
+    return undefined;
+  }
+
+  private static formatRequest(r: Request) {
+    const formatDate = (rawDate?: any) => {
+      const date = RequestController.toJSDate(rawDate);
+      if (!date) return undefined;
+      const d = date.getDate().toString().padStart(2, '0');
+      const m = (date.getMonth() + 1).toString().padStart(2, '0');
+      const y = date.getFullYear();
+      return `${d}-${m}-${y}`;
+    };
+
+    return {
+      ...r,
+      user: r.user || 'Usuário Não Identificado',
+      displayId: `SOL-${r.id.substring(0, 4).toUpperCase()}`,
+      date: formatDate(r.date),
+      paymentDate: formatDate(r.paymentDate)
+    };
+  }
+
   static async create(req: ExpressRequest, res: Response) {
     try {
       const requestRepo = getRepository(Request);
       const historyRepo = getRepository(History);
       const { 
-        title, userId, status, type, project, 
-        paymentMethod, location, date,
-        paymentDate, subsidiary, department, chargeClass, competence, nfNumber
+        title, userId, status, 
+        paymentMethod, date,
+        paymentDate, subsidiary, department, chargeClass, competence, nfNumber,
+        userLevel, approverId, userName, user
       } = req.body;
 
       const newRequest = new Request();
       newRequest.title = title;
       newRequest.userId = userId;
-      newRequest.status = status || RequestStatus.RASCUNHO;
-      newRequest.type = type;
-      newRequest.project = project;
+      newRequest.user = user || userName || 'Usuário';
       newRequest.paymentMethod = paymentMethod;
-      newRequest.location = location;
       newRequest.date = date ? new Date(date) : new Date();
       newRequest.totalValue = 0;
       newRequest.isMultiple = false;
 
-      // Atribuir novos campos
+      // Status logic based on level
+      if (status === RequestStatus.PENDENTE_DIRETOR || status === 'Pendente') {
+        if (userLevel === 'Diretor') {
+          newRequest.status = RequestStatus.PENDENTE_FINANCEIRO;
+        } else {
+          newRequest.status = RequestStatus.PENDENTE_DIRETOR;
+        }
+      } else {
+        newRequest.status = status || RequestStatus.RASCUNHO;
+      }
+
       newRequest.paymentDate = paymentDate ? new Date(paymentDate) : undefined;
       newRequest.subsidiary = subsidiary;
       newRequest.department = department;
       newRequest.chargeClass = chargeClass;
       newRequest.competence = competence;
       newRequest.nfNumber = nfNumber;
+      newRequest.approverId = approverId;
 
       const savedRequest = await requestRepo.create(newRequest);
 
-      const initialHistory = new History();
-      initialHistory.solicitacaoId = savedRequest.id;
-      initialHistory.action = status === RequestStatus.PENDENTE ? 'Solicitação criada e enviada para aprovação' : 'Rascunho inicial criado';
-      initialHistory.date = new Date();
-      initialHistory.userName = (userId as string) || 'Colaborador';
-      await historyRepo.create(initialHistory);
+      const history = new History();
+      history.solicitacaoId = savedRequest.id;
+      let historyAction = 'Rascunho inicial criado';
+      if (newRequest.status === RequestStatus.PENDENTE_DIRETOR) historyAction = 'Solicitação enviada para aprovação do Diretor';
+      if (newRequest.status === RequestStatus.PENDENTE_FINANCEIRO) historyAction = 'Solicitação enviada direto para o Financeiro';
+      
+      history.action = historyAction;
+      history.date = new Date();
+      history.userName = (userName as string) || 'Colaborador';
+      await historyRepo.create(history);
 
-      res.status(201).json(savedRequest);
+      res.status(201).json(RequestController.formatRequest(savedRequest));
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao criar solicitação' });
@@ -53,8 +93,9 @@ export class RequestController {
     try {
       const id = req.params.id as string;
       const { 
-        title, type, project, paymentMethod, location, date, status, note, userName,
-        paymentDate, subsidiary, department, chargeClass, competence, nfNumber
+        title, paymentMethod, date, status, note, userName,
+        paymentDate, subsidiary, department, chargeClass, competence, nfNumber,
+        userLevel
       } = req.body;
       const requestRepo = getRepository(Request);
       const historyRepo = getRepository(History);
@@ -62,9 +103,9 @@ export class RequestController {
       const request = await requestRepo.findById(id);
       if (!request) return res.status(404).json({ error: 'Solicitação não encontrada' });
 
-      // BLOCO DE EDIÇÃO: Permitido apenas para Rascunho ou Devolvido
-      const isEditingFields = title || type || project || paymentMethod || location || date || 
-                               paymentDate || subsidiary || department || chargeClass || competence || nfNumber;
+      // Edit block: only for Draft or Returned
+      const isEditingFields = title || paymentMethod || date || 
+                                paymentDate || subsidiary || department || chargeClass || competence || nfNumber;
       
       if (isEditingFields) {
         if (request.status !== RequestStatus.RASCUNHO && request.status !== RequestStatus.DEVOLVIDO) {
@@ -72,17 +113,12 @@ export class RequestController {
         }
       }
 
-      // Regra para nota obrigatória em rejeição/devolução
       if ((status === RequestStatus.DEVOLVIDO || status === RequestStatus.REJEITADO) && !note) {
-        return res.status(400).json({ error: 'O preenchimento do campo "note" (observação) é obrigatório para devoluções ou rejeições.' });
+        return res.status(400).json({ error: 'O preenchimento do campo "note" é obrigatório para devoluções ou rejeições.' });
       }
 
-      // Atualizar campos se fornecidos
       if (title) request.title = title;
-      if (type) request.type = type;
-      if (project) request.project = project;
       if (paymentMethod) request.paymentMethod = paymentMethod;
-      if (location) request.location = location;
       if (date) request.date = new Date(date);
       if (paymentDate) request.paymentDate = new Date(paymentDate);
       if (subsidiary !== undefined) request.subsidiary = subsidiary;
@@ -91,25 +127,35 @@ export class RequestController {
       if (competence !== undefined) request.competence = competence;
       if (nfNumber !== undefined) request.nfNumber = nfNumber;
 
-      if (status) request.status = status;
-      await requestRepo.update(request);
-
       const actionMap = {
         [RequestStatus.APROVADO]: 'Aprovado pelo Financeiro',
         [RequestStatus.DEVOLVIDO]: 'Devolvido para Correção',
         [RequestStatus.REJEITADO]: 'Rejeitado pelo Financeiro',
-        [RequestStatus.PENDENTE]: 'Enviado para Aprovação',
+        [RequestStatus.PENDENTE_DIRETOR]: 'Enviado para Aprovação do Diretor',
+        [RequestStatus.PENDENTE_FINANCEIRO]: 'Enviado para o Financeiro',
       };
 
       const history = new History();
       history.solicitacaoId = id;
-      history.action = actionMap[status as keyof typeof actionMap] || `Status alterado para ${status}`;
       history.date = new Date();
       history.userName = (userName as string) || 'Admin Financeiro';
       history.note = note;
+
+      const isDirectorApproving = userLevel === 'Diretor' && status === RequestStatus.APROVADO;
+      const wasPendingDirector = request.status === RequestStatus.PENDENTE_DIRETOR || (request.status as string) === 'Pendente';
+
+      if (isDirectorApproving && wasPendingDirector) {
+        request.status = RequestStatus.PENDENTE_FINANCEIRO;
+        history.action = 'Aprovado pelo Diretor (Enviado ao Financeiro)';
+      } else {
+        if (status) request.status = status;
+        history.action = actionMap[status as keyof typeof actionMap] || `Status alterado para ${status}`;
+      }
+
+      await requestRepo.update(request);
       await historyRepo.create(history);
 
-      res.json(request);
+      res.json(RequestController.formatRequest(request));
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao atualizar status' });
@@ -137,16 +183,29 @@ export class RequestController {
       else if (payload.totalValue !== request.totalValue) actionMessage = 'Valores do rascunho atualizados';
 
       Object.assign(request, payload);
+      
+      // FIX: Status logic based on level for drafts being submitted
+      if (payload.status === RequestStatus.PENDENTE_DIRETOR || payload.status === 'Pendente' || payload.status === 'Aguardando Diretor') {
+        if (payload.userLevel === 'Diretor') {
+          request.status = RequestStatus.PENDENTE_FINANCEIRO;
+        } else {
+          request.status = RequestStatus.PENDENTE_DIRETOR;
+        }
+      }
+
+      if (payload.date) request.date = new Date(payload.date);
+      if (payload.paymentDate) request.paymentDate = new Date(payload.paymentDate);
+
       await requestRepo.update(request);
 
       const history = new History();
       history.solicitacaoId = id;
       history.action = actionMessage;
       history.date = new Date();
-      history.userName = (payload.userId as string) || 'Colaborador';
+      history.userName = (payload.userName as string) || 'Colaborador';
       await historyRepo.create(history);
 
-      res.json(request);
+      res.json(RequestController.formatRequest(request));
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao atualizar rascunho' });
@@ -155,24 +214,35 @@ export class RequestController {
 
   static async list(req: ExpressRequest, res: Response) {
     try {
-      const role = req.query.role as string;
-      const userId = req.query.userId as string;
-      const requestRepo = getRepository(Request);
+      const { role, userId, level } = req.query;
       
-      if (role === 'admin') {
-         const requests = await requestRepo.whereArrayContainsAny('status', [
-           RequestStatus.PENDENTE,
-           RequestStatus.APROVADO,
-           RequestStatus.REJEITADO,
-           RequestStatus.DEVOLVIDO
-         ]).find();
-         return res.json(requests);
-      } else {
-        const requests = await requestRepo.whereEqualTo('userId', userId).find();
-        return res.json(requests);
+      if (!role && !userId) return res.json([]);
+
+      const requestRepo = getRepository(Request);
+      let requests: Request[] = [];
+
+       if (role === 'admin') {
+          requests = await requestRepo.whereIn('status', [
+            RequestStatus.PENDENTE_FINANCEIRO,
+            RequestStatus.APROVADO,
+            RequestStatus.REJEITADO,
+            RequestStatus.DEVOLVIDO
+          ]).find();
+       } else if (level === 'Diretor') {
+          const userIdStr = userId as string;
+          const all = await requestRepo.find();
+          requests = all.filter(r => 
+            r.userId === userIdStr || 
+            (r.approverId === userIdStr && (r.status === RequestStatus.PENDENTE_DIRETOR || (r.status as string) === 'Pendente'))
+          );
+       } else {
+        const all = await requestRepo.find();
+        requests = all.filter(r => r.userId === userId);
       }
+      const formattedRequests = requests.map(r => RequestController.formatRequest(r));
+      return res.json(formattedRequests);
     } catch (error) {
-      console.error(error);
+      console.error('[LIST ERROR]', error);
       res.status(500).json({ error: 'Erro ao listar solicitações' });
     }
   }
@@ -190,7 +260,24 @@ export class RequestController {
       const receipts = await receiptRepo.whereEqualTo('solicitacaoId', id).find();
       const history = await historyRepo.whereEqualTo('solicitacaoId', id).find();
 
-      res.json({ ...request, receipts, history });
+      const formattedReceipts = receipts.map(r => {
+        const date = RequestController.toJSDate(r.receiptDate);
+        return {
+          ...r,
+          receiptDate: date ? date.toLocaleDateString('pt-BR').replace(/\//g, '-') : r.receiptDate
+        };
+      });
+
+      const formattedHistory = history.map(h => {
+        const date = RequestController.toJSDate(h.date);
+        return {
+          ...h,
+          date: date ? date.toLocaleDateString('pt-BR').replace(/\//g, '-') : h.date
+        };
+      });
+
+      const formatted = RequestController.formatRequest(request);
+      res.json({ ...formatted, receipts: formattedReceipts, history: formattedHistory });
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao buscar detalhes' });
