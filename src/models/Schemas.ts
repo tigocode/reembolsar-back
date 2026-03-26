@@ -16,6 +16,7 @@ export class Request {
   user!: string;
   title!: string;
   paymentMethod!: string;
+  observation?: string;
   date!: Date;
   status!: RequestStatus;
   totalValue!: number;

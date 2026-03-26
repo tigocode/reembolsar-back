@@ -36,7 +36,7 @@ export class RequestController {
       const historyRepo = getRepository(History);
       const { 
         title, userId, status, 
-        paymentMethod, date,
+        paymentMethod, observation, date,
         paymentDate, subsidiary, department, chargeClass, competence, nfNumber,
         userLevel, approverId, userName, user
       } = req.body;
@@ -46,6 +46,7 @@ export class RequestController {
       newRequest.userId = userId;
       newRequest.user = user || userName || 'Usuário';
       newRequest.paymentMethod = paymentMethod;
+      newRequest.observation = observation;
       newRequest.date = date ? new Date(date) : new Date();
       newRequest.totalValue = 0;
       newRequest.isMultiple = false;
