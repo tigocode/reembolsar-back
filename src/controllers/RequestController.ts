@@ -30,6 +30,44 @@ export class RequestController {
     };
   }
 
+  private static formatReceipts(receipts: Receipt[]) {
+    return receipts.map(r => {
+      const date = RequestController.toJSDate(r.receiptDate);
+      return {
+        ...r,
+        receiptDate: date ? date.toLocaleDateString('pt-BR').replace(/\//g, '-') : r.receiptDate
+      };
+    });
+  }
+
+  private static formatHistory(history: History[]) {
+    return history.map(h => {
+      const date = RequestController.toJSDate(h.date);
+      return {
+        ...h,
+        date: date ? date.toLocaleDateString('pt-BR').replace(/\//g, '-') : h.date
+      };
+    });
+  }
+
+  private static async getFullResponse(requestId: string) {
+    const requestRepo = getRepository(Request);
+    const receiptRepo = getRepository(Receipt);
+    const historyRepo = getRepository(History);
+
+    const request = await requestRepo.findById(requestId);
+    if (!request) return null;
+
+    const receipts = await receiptRepo.whereEqualTo('solicitacaoId', requestId).find();
+    const history = await historyRepo.whereEqualTo('solicitacaoId', requestId).find();
+
+    return {
+      ...RequestController.formatRequest(request),
+      receipts: RequestController.formatReceipts(receipts),
+      history: RequestController.formatHistory(history)
+    };
+  }
+
   static async create(req: ExpressRequest, res: Response) {
     try {
       const requestRepo = getRepository(Request);
@@ -156,7 +194,8 @@ export class RequestController {
       await requestRepo.update(request);
       await historyRepo.create(history);
 
-      res.json(RequestController.formatRequest(request));
+      const fullResponse = await RequestController.getFullResponse(id);
+      res.json(fullResponse);
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao atualizar status' });
@@ -206,7 +245,8 @@ export class RequestController {
       history.userName = (payload.userName as string) || 'Colaborador';
       await historyRepo.create(history);
 
-      res.json(RequestController.formatRequest(request));
+      const fullResponse = await RequestController.getFullResponse(id);
+      res.json(fullResponse);
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao atualizar rascunho' });
@@ -251,34 +291,9 @@ export class RequestController {
   static async getDetails(req: ExpressRequest, res: Response) {
     try {
       const id = req.params.id as string;
-      const requestRepo = getRepository(Request);
-      const receiptRepo = getRepository(Receipt);
-      const historyRepo = getRepository(History);
-
-      const request = await requestRepo.findById(id);
-      if (!request) return res.status(404).json({ error: 'Solicitação não encontrada' });
-
-      const receipts = await receiptRepo.whereEqualTo('solicitacaoId', id).find();
-      const history = await historyRepo.whereEqualTo('solicitacaoId', id).find();
-
-      const formattedReceipts = receipts.map(r => {
-        const date = RequestController.toJSDate(r.receiptDate);
-        return {
-          ...r,
-          receiptDate: date ? date.toLocaleDateString('pt-BR').replace(/\//g, '-') : r.receiptDate
-        };
-      });
-
-      const formattedHistory = history.map(h => {
-        const date = RequestController.toJSDate(h.date);
-        return {
-          ...h,
-          date: date ? date.toLocaleDateString('pt-BR').replace(/\//g, '-') : h.date
-        };
-      });
-
-      const formatted = RequestController.formatRequest(request);
-      res.json({ ...formatted, receipts: formattedReceipts, history: formattedHistory });
+      const fullResponse = await RequestController.getFullResponse(id);
+      if (!fullResponse) return res.status(404).json({ error: 'Solicitação não encontrada' });
+      res.json(fullResponse);
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: 'Erro ao buscar detalhes' });
