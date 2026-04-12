@@ -81,9 +81,23 @@ export class ReceiptController {
       newReceipt.solicitacaoId = solicitacaoId;
       newReceipt.description = description || 'Recibo';
       newReceipt.value = Number(value) || 0;
-      newReceipt.receiptUrl = receiptUrl;
       newReceipt.merchantName = merchantName;
       newReceipt.receiptDate = receiptDate;
+
+      // Base64 Handling (Critical to avoid Firestore 1MB limit)
+      if (receiptUrl && receiptUrl.startsWith('data:image/')) {
+        try {
+          const uploadResult = await cloudinary.uploader.upload(receiptUrl, {
+            folder: 'reembolsos',
+          });
+          newReceipt.receiptUrl = uploadResult.secure_url;
+        } catch (error) {
+          console.error('[RECEIPT] Cloudinary upload failed:', error);
+          newReceipt.receiptUrl = receiptUrl; // Fallback
+        }
+      } else {
+        newReceipt.receiptUrl = receiptUrl;
+      }
 
       const savedReceipt = await receiptRepo.create(newReceipt);
 
