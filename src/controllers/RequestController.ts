@@ -1,6 +1,7 @@
 import { Request as ExpressRequest, Response } from 'express';
 import { getRepository } from 'fireorm';
 import { Request, RequestStatus, Receipt, History } from '../models/Schemas.js';
+import { cloudinary } from '../config/services.js';
 
 export class RequestController {
   private static toJSDate(d: any): Date | undefined {
@@ -18,15 +19,28 @@ export class RequestController {
       const d = date.getDate().toString().padStart(2, '0');
       const m = (date.getMonth() + 1).toString().padStart(2, '0');
       const y = date.getFullYear();
-      return `${d}-${m}-${y}`;
+      return `${y}-${m}-${d}`;
     };
 
     return {
-      ...r,
+      id: r.id,
+      userId: r.userId,
       user: r.user || 'Usuário Não Identificado',
-      displayId: `SOL-${r.id.substring(0, 4).toUpperCase()}`,
+      title: r.title,
+      paymentMethod: r.paymentMethod,
+      observation: r.observation,
       date: formatDate(r.date),
-      paymentDate: formatDate(r.paymentDate)
+      status: r.status,
+      totalValue: r.totalValue,
+      isMultiple: !!r.isMultiple,
+      paymentDate: formatDate(r.paymentDate),
+      subsidiary: r.subsidiary,
+      department: r.department,
+      chargeClass: r.chargeClass,
+      competence: r.competence,
+      nfNumber: r.nfNumber,
+      displayId: `SOL-${r.id.substring(0, 4).toUpperCase()}`,
+      approverId: r.approverId
     };
   }
 
@@ -68,6 +82,64 @@ export class RequestController {
     };
   }
 
+  private static async syncReceipts(requestId: string, receiptsPayload: any[]) {
+    const receiptRepo = getRepository(Receipt);
+    const requestRepo = getRepository(Request);
+    
+    const currentReceipts = await receiptRepo.whereEqualTo('solicitacaoId', requestId).find();
+    const currentIds = currentReceipts.map(r => r.id);
+    const payloadIds = receiptsPayload.map(r => r.id).filter(id => id && !id.startsWith('REC-NEW-'));
+
+    const toDelete = currentIds.filter(id => !payloadIds.includes(id));
+    for (const id of toDelete) {
+      await receiptRepo.delete(id);
+    }
+
+    for (const r of receiptsPayload) {
+      let receipt: Receipt;
+      const isNew = !r.id || r.id.startsWith('REC-NEW-');
+
+      if (isNew) {
+        receipt = new Receipt();
+        receipt.solicitacaoId = requestId;
+      } else {
+        const existing = currentReceipts.find(cr => cr.id === r.id);
+        if (!existing) continue;
+        receipt = existing;
+      }
+
+      receipt.description = r.description || r.merchantName || 'Recibo';
+      receipt.merchantName = r.merchantName || r.description;
+      receipt.value = Number(r.value) || 0;
+      receipt.receiptDate = r.receiptDate;
+
+      if (r.receiptUrl && r.receiptUrl.startsWith('data:image/')) {
+        try {
+          const uploadResult = await cloudinary.uploader.upload(r.receiptUrl, {
+            folder: 'reembolsos',
+          });
+          receipt.receiptUrl = uploadResult.secure_url;
+        } catch (error) {
+          console.error('[SYNC] Cloudinary upload failed:', error);
+          receipt.receiptUrl = r.receiptUrl;
+        }
+      } else {
+        receipt.receiptUrl = r.receiptUrl;
+      }
+
+      if (isNew) await receiptRepo.create(receipt);
+      else await receiptRepo.update(receipt);
+    }
+
+    const finalReceipts = await receiptRepo.whereEqualTo('solicitacaoId', requestId).find();
+    const request = await requestRepo.findById(requestId);
+    if (request) {
+      request.totalValue = finalReceipts.reduce((sum, r) => sum + (r.value || 0), 0);
+      request.isMultiple = finalReceipts.length > 1;
+      await requestRepo.update(request);
+    }
+  }
+
   static async create(req: ExpressRequest, res: Response) {
     try {
       const requestRepo = getRepository(Request);
@@ -76,7 +148,7 @@ export class RequestController {
         title, userId, status, 
         paymentMethod, observation, date,
         paymentDate, subsidiary, department, chargeClass, competence, nfNumber,
-        userLevel, approverId, userName, user
+        userLevel, approverId, userName, user, isMultiple
       } = req.body;
 
       const newRequest = new Request();
@@ -87,7 +159,7 @@ export class RequestController {
       newRequest.observation = observation;
       newRequest.date = date ? new Date(date) : new Date();
       newRequest.totalValue = 0;
-      newRequest.isMultiple = false;
+      newRequest.isMultiple = !!isMultiple;
 
       // Status logic based on level
       if (status === RequestStatus.PENDENTE_DIRETOR || status === 'Pendente') {
@@ -109,6 +181,11 @@ export class RequestController {
       newRequest.approverId = approverId;
 
       const savedRequest = await requestRepo.create(newRequest);
+
+      // Sincronizar Recibos se vierem no payload
+      if (req.body.receipts && Array.isArray(req.body.receipts)) {
+        await RequestController.syncReceipts(savedRequest.id, req.body.receipts);
+      }
 
       const history = new History();
       history.solicitacaoId = savedRequest.id;
@@ -134,7 +211,7 @@ export class RequestController {
       const { 
         title, paymentMethod, date, status, note, userName,
         paymentDate, subsidiary, department, chargeClass, competence, nfNumber,
-        userLevel
+        userLevel, isMultiple
       } = req.body;
       const requestRepo = getRepository(Request);
       const historyRepo = getRepository(History);
@@ -144,7 +221,7 @@ export class RequestController {
 
       // Edit block: only for Draft or Returned
       const isEditingFields = title || paymentMethod || date || 
-                                paymentDate || subsidiary || department || chargeClass || competence || nfNumber;
+        paymentDate || subsidiary || department || chargeClass || competence || nfNumber || isMultiple !== undefined;
       
       if (isEditingFields) {
         if (request.status !== RequestStatus.RASCUNHO && request.status !== RequestStatus.DEVOLVIDO) {
@@ -165,6 +242,7 @@ export class RequestController {
       if (chargeClass !== undefined) request.chargeClass = chargeClass;
       if (competence !== undefined) request.competence = competence;
       if (nfNumber !== undefined) request.nfNumber = nfNumber;
+      if (isMultiple !== undefined) request.isMultiple = !!isMultiple;
 
       const actionMap = {
         [RequestStatus.APROVADO]: 'Aprovado pelo Financeiro',
@@ -192,6 +270,13 @@ export class RequestController {
       }
 
       await requestRepo.update(request);
+      
+      // Sincronizar Recibos se vierem no payload (Edição de Devolvidos/Rascunhos via Status)
+      if (req.body.receipts && Array.isArray(req.body.receipts) && 
+         (request.status === RequestStatus.RASCUNHO || request.status === RequestStatus.DEVOLVIDO)) {
+        await RequestController.syncReceipts(id, req.body.receipts);
+      }
+
       await historyRepo.create(history);
 
       const fullResponse = await RequestController.getFullResponse(id);
@@ -235,6 +320,11 @@ export class RequestController {
 
       if (payload.date) request.date = new Date(payload.date);
       if (payload.paymentDate) request.paymentDate = new Date(payload.paymentDate);
+
+      // Sincronizar Recibos
+      if (payload.receipts && Array.isArray(payload.receipts)) {
+        await RequestController.syncReceipts(id, payload.receipts);
+      }
 
       await requestRepo.update(request);
 
